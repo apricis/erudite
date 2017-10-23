@@ -4,14 +4,25 @@
 	<div class="container">
     <form class="row" method="POST" action="{{url_for('search')}}">
       <div class="input-field col s11">
-        <input id="query" name="query" type="text" class="validate" value="{{query}}">
-        <label for="query">Here's what have you asked</label>
+        <input id="question" name="question" type="text" class="validate" value="{{question}}">
+        <label for="question">Here's what have you asked</label>
       </div>
 
       <div class="col s1">
         <input type="submit" class="waves-effect waves-light btn" value="Ask">
       </div>
     </form>
+
+    <div class="row">
+    	<div class="col s12">
+	    	<div class="card light-green darken-4">
+	    		<div class="card-content white-text">
+		    		<span class="card-title">The answer is: {{answer}}</span>
+		    		<p>Request took {{ g.request_time() }}</p>
+		    	</div>
+	    	</div>
+	    </div>
+    </div>
       
     <div class="row">
     	<div class="col s12">
