@@ -1,0 +1,52 @@
+{% extends 'layout.html' %}
+
+{% block scripts %}
+  <script type="text/javascript" src="{{ url_for('static', filename='scripts/typed.min.js') }}"></script>
+{% endblock %}
+
+{% block body %}
+  <div class="logo row valign-wrapper">
+    <div class="center-block">
+      <div id="typed-strings">
+        <p>Erudite</p>
+        <p>Ерудит</p>
+        <p>Lärd</p>
+        <p>Эрудит</p>
+        <p>エリート</p>
+        <p>博學</p>
+        <p>Bilgili</p>
+        <p>Erudite</p>
+      </div>
+      <span id="typed" class="typed-logo"></span>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="row center-block">
+      <form class="col s12" method="POST" action="{{url_for('search')}}">
+        <div class="row">
+          <div class="input-field col s10">
+            <input id="query" name="query" type="text" class="validate">
+            <label for="query">What do you want to ask about?</label>
+          </div>
+
+          <div class="col s2">
+            <input type="submit" class="waves-effect waves-light btn" value="Ask">
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    var typed = new Typed('#typed', {
+      stringsElement: '#typed-strings',
+      typeSpeed: 50,
+      backSpeed: 50,
+      onComplete: function () {
+        $(".typed-cursor").hide();
+        $("#typed-desc").show();
+      }
+    });
+  </script>
+{% endblock %}

@@ -1,0 +1,17 @@
+<!doctype html>
+<head>
+  <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='styles/materialize.min.css') }}">
+  <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='styles/style.css') }}">
+  {% block styles %}{% endblock %}
+
+  <script type="text/javascript" src="{{ url_for('static', filename='scripts/jquery.min.js') }}"></script>
+  <script type="text/javascript" src="{{ url_for('static', filename='scripts/jquery.validate.min.js') }}"></script>
+  <script type="text/javascript" src="{{ url_for('static', filename='scripts/materialize.min.js') }}"></script>
+  {% block scripts %}{% endblock %}
+  <title>Erudite - ready for your questions!</title>
+</head>
+<body>
+  {% block body %}{% endblock %}
+
+  <script type="text/javascript" src="{{ url_for('static', filename='scripts/script.js') }}"></script>
+</body>

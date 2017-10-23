@@ -1,0 +1,48 @@
+{% extends 'layout.html' %}
+
+{% block body %}
+	<div class="container">
+    <form class="row" method="POST" action="{{url_for('search')}}">
+      <div class="input-field col s11">
+        <input id="query" name="query" type="text" class="validate" value="{{query}}">
+        <label for="query">Here's what have you asked</label>
+      </div>
+
+      <div class="col s1">
+        <input type="submit" class="waves-effect waves-light btn" value="Ask">
+      </div>
+    </form>
+      
+    <div class="row">
+    	<div class="col s12">
+    		<table>
+		      <thead>
+		        <tr>
+		          <th>Property</th>
+		          <th>Value</th>
+		        </tr>
+		      </thead>
+
+		      <tbody>
+		        <tr>
+		          <td>Expected answer type</td>
+		          <td>{{answer_type}}</td>
+		        </tr>
+		      </tbody>
+		    </table>
+    	</div>
+    </div>
+    <div class="row">
+			{% for page in pages %}
+				<div class="col s12">
+				  <div class="card blue-grey darken-1">
+				    <div class="card-content white-text">
+				      <span class="card-title">{{page._source.title}} ({{page._score}})</span>
+				      <p>{{page._source.passage}}</p>
+				    </div>
+				  </div>
+				</div>
+			{% endfor %}
+		</div>
+	</div>
+{% endblock %}

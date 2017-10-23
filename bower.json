@@ -1,0 +1,22 @@
+{
+  "name": "erudite",
+  "authors": [
+    "Dmytro Kalpakchi <dkalpackchi@gmail.com>"
+  ],
+  "description": "A factoid QA system",
+  "license": "MIT",
+  "homepage": "",
+  "private": true,
+  "ignore": [
+    "**/.*",
+    "node_modules",
+    "bower_components",
+    "test",
+    "tests"
+  ],
+  "dependencies": {
+    "typed.js": "^2.0.5",
+    "materialize": "^0.100.2",
+    "jquery-validation": "^1.17.0"
+  }
+}
