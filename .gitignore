@@ -1,8 +1,11 @@
 __pycache__
 static
 node_modules
+data
 bower_components
 answerer/__pycache__
 answerer/*.txt
 answerer/*.clf
 answerer/*.le
+*.txt
+*.ini
