@@ -6,6 +6,10 @@ from collections import defaultdict
 from polyglot.text import Text
 import dateparser
 import logging
+import string
+from measurement.base import MeasureBase
+from measurement.measures import Weight, Distance, Speed, Temperature
+from word2number import w2n
 
 
 SNIPPETS = [
@@ -29,24 +33,108 @@ def nwise(iterable, n=2):
     return list(zip(*iters))
 
 
+class NumericRecognizer(object):
+    def __init__(self):
+        self.si_prefixes = MeasureBase.SI_PREFIXES.values()
+        self.dist_units = self.__build_distance_units()
+        self.temp_units = self.__build_temperature_units()
+        self.weight_units = self.__build_weight_units()
+
+    def __build_temperature_units(self):
+        units = list(Temperature.UNITS.keys())
+        aliases = Temperature.ALIAS.keys()
+        units.extend(aliases)
+        return units
+
+    def __build_distance_units(self):
+        units = list(Distance.UNITS.keys())
+        si_units = Distance.SI_UNITS
+        prefixed_si_units = ['{}{}'.format(p, u) for u in si_units for p in self.si_prefixes]
+        singular_aliases = Distance.ALIAS.keys()
+        plural_aliases = ["{}s".format(a) for a in singular_aliases if a[-1] != 's']
+        units.extend(prefixed_si_units)
+        units.extend(singular_aliases)
+        units.extend(plural_aliases)
+        return units
+
+    def __build_weight_units(self):
+        units = list(Weight.UNITS.keys())
+        si_units = Weight.SI_UNITS
+        prefixed_si_units = ['{}{}'.format(p, u) for u in si_units for p in self.si_prefixes]
+        singular_aliases = Weight.ALIAS.keys()
+        plural_aliases = ["{}s".format(a) for a in singular_aliases if a[-1] != 's']
+        units.extend(prefixed_si_units)
+        units.extend(singular_aliases)
+        units.extend(plural_aliases)
+        return units
+
+    def check_float(self, word):
+        try:
+            float(word)
+            return True
+        except ValueError:
+            return False
+
+    def check_verbose(self, word):
+        try:
+            w2n.word_to_num(word)
+            return True
+        except ValueError:
+            return False
+
+    def check_numeric(self, word):
+        return word.isnumeric() or self.check_float(word) or self.check_verbose(word)
+
+    def check_distance(self, word):
+        # word is a tuple containing all unigram components of ngram
+        if len(word) == 1: return False
+        return all([self.check_numeric(w) for w in word[:-1]]) and word[-1] in self.dist_units
+
+    def check_temperature(self, word):
+        # degree sign?
+        if len(word) == 1: return False
+        return all([self.check_numeric(w) for w in word[:-1]]) and word[-1] in self.temp_units
+
+    def check_weight(self, word):
+        if len(word) == 1: return False
+        return all([self.check_numeric(w) for w in word[:-1]]) and word[-1] in self.weight_units
+        
+
 class NGramTiler(object):
-    def __init__(self, max_n=3, question='', exp_answer_type='', stopwords=[]):
+    def __init__(self, max_n=3, connection=None, question='', exp_answer_type='', stopwords=[]):
         self.max_n = max_n
         self.__question = question.lower().split()
         self.__eat = exp_answer_type
         self.__ngram_names = ['uni', 'bi', 'tri', 'tetra', 'peta']
         self.__entities = {}
-        self.__test_nec = {
-            'LOC': 'LOC' in self.__eat,
-            'ORG': self.__eat == 'HUM:gr',
-            'PER': self.__eat in ['HUM:ind', 'HUM:title'],
-            None: False
-        }
         self.__stopwords = stopwords
+        self.__nr = NumericRecognizer()
+        self.__conn = connection
+
+    def __test_nec(self, ner_tag):
+        if 'LOC' in ner_tag:
+            return 'LOC' in self.__eat
+        elif 'ORG' in ner_tag:
+            return self.__eat == 'HUM:gr'
+        elif 'PER' in ner_tag:
+            return self.__eat in ['HUM:ind', 'HUM:title']
+        else:
+            return False
 
     def __test_eat(self, word):
+        # word here is a tuple containing all unigram components of ngram
         if 'NUM' in self.__eat:
-            return word.isnumeric()
+            if self.__eat == 'NUM:dist':
+                return self.__nr.check_distance(word)
+            elif self.__eat == 'NUM:temp':
+                return self.__nr.check_temperature(word)
+            elif self.__eat == 'NUM:weight':
+                return self.__nr.check_weight(word)
+            elif self.__eat == 'NUM:date':
+                # here should check also months
+                return " ".join(word).isnumeric()
+            else:
+                return self.__nr.check_numeric(word)
         elif 'ABBR' in self.__eat:
             return True
         elif 'DESC' in self.__eat:
@@ -54,20 +142,27 @@ class NGramTiler(object):
         elif 'ENTY' in self.__eat:
             return True
         else:
-            return self.__test_nec[self.__entities.get(word, None)]
+            return self.__test_nec(self.__entities.get(word, ''))
 
     def __not_question_words(self, words):
         return all([word not in self.__question for word in words])
 
     def mine(self, snippets):
-        snippets = [re.sub(r'[.,!?;()]', '', snippet.lower()) for snippet in snippets]
         for snippet in snippets:
-            text = Text(snippet, hint_language_code='en')
+            text = Text(re.sub('\n', '<br>', snippet.lower()), hint_language_code='en')
             entities = text.entities
             for ent in entities:
-                self.__entities[" ".join(ent)] = ent.tag[2:]
+                e = tuple(ent)
+                if e not in self.__entities:
+                    self.__entities[e] = defaultdict(int)
+                self.__entities[e][ent.tag] += 1
             # pos_tags = text.pos_tags
             # print(pos_tags)
+        # majority vote on NER tags
+        for ent in self.__entities:
+            ngram_length = len(ent)
+            self.__entities[ent] = max(self.__entities[ent].items(), key=operator.itemgetter(1))[0]
+        snippets = [re.sub(r'[.,!?;()]', '', snippet.lower()) for snippet in snippets]
         snippets = [snippet.split() for snippet in snippets]
         ng_snippets = {}
         for n in range(self.max_n):
@@ -85,43 +180,47 @@ class NGramTiler(object):
             stats[ng_type] = {k:len(v) for k, v in stats[ng_type].items()}
         return stats
 
+    def __check_stopwords(self, word):
+        return word[0] not in self.__stopwords and word[-1] not in self.__stopwords
+
+    def __check_punctuation(self, word):
+        punctuation = '{}—'.format(string.punctuation)
+        return word[0] not in punctuation and word[-1] not in punctuation
+
     def filter(self, votes):
         filtered_votes = {}
         for ng_type in votes:
             filtered_votes[ng_type] = {}
             for k, v in votes[ng_type].items():
-                if k[0] not in self.__stopwords and k[-1] not in self.__stopwords:
-                    if self.__test_eat(" ".join(k)) and self.__not_question_words(k):
+                if self.__check_stopwords(k) and self.__check_punctuation(k):
+                    if self.__test_eat(k) and self.__not_question_words(k):
                         filtered_votes[ng_type][k] = v
-                    # else:
-                        # for word in k:
-                        #   # focus words exception should be added
-                        #   if self.__test_eat(word) and word not in self.__question:
-                        #       filtered_votes[ng_type][k] = v
-                        #       break
         return filtered_votes
 
-    def tile(self, votes, df):
+    def tile(self, votes):
         # Boosting n-grams with their unigram components
         # re-scoring with normalized idf sum
-        N = len(df.keys())
-        rescored_votes = []
-        for ng_type in votes:
-            for ng, score in votes[ng_type].items():
-                ng_idf = 0
-                for unigram in ng:
-                    if ng_type != 'unigram':
-                        score += votes['unigrams'].get(unigram, 0)
-                    ng_idf += math.log(N / df.get(unigram, 1))
-                score *= ng_idf / len(ng)
-                rescored_votes.append((ng, score))
-
+        with self.__conn.cursor() as cursor:
+            res = cursor.execute("SELECT COUNT(*) FROM words;")
+            N = cursor.fetchone()[0]
+            rescored_votes = []
+            for ng_type in votes:
+                for ng, score in votes[ng_type].items():
+                    ng_idf = 0
+                    for unigram in ng:
+                        if ng_type != 'unigrams':
+                            score += votes['unigrams'].get((unigram,), 0)
+                        res = cursor.execute("SELECT df FROM words WHERE word = %s", unigram)
+                        df = cursor.fetchone()[0] if res else 1
+                        ng_idf += math.log(N / df)
+                    score *= ng_idf / len(ng)
+                    rescored_votes.append((ng, score))
         return sorted(rescored_votes, key=operator.itemgetter(1), reverse=True)
 
-    def extract(self, snippets, df):
+    def extract(self, snippets):
         mined = self.mine(snippets)
-        votes = self.tile(self.filter(mined), df)
-        print(votes)
+        votes = self.tile(self.filter(mined))
+        # print(votes)
         return " ".join(votes[0][0]) if votes else None
 
 

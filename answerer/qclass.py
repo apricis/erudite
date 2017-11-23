@@ -52,13 +52,17 @@ def q2vec(q, vecs, weights=None, default_weight=1):
         return np.average([vecs[x.lower()] for x in q if x.lower() in vecs], axis=0)
 
 
-def q2bow(q, words):
-    v = np.zeros((len(words), 1))
-    for w in q:
-        i = words.get(w.lower(), -1)
-        if i != -1:
-            v[i] = 1
-    return v
+def q2bow(q, conn):
+    with conn.cursor() as cursor:
+        res = cursor.execute("SELECT COUNT(*) FROM words;")
+        N = cursor.fetchone()[0]
+        v = np.zeros((N, 1))
+        res = cursor.execute("""
+        SELECT id FROM words WHERE word IN ({});
+        """.format(",".join(["%s"]*len(q))), q)
+        ids = [x[0] for x in cursor.fetchall()]
+        v[ids] = 1
+        return v
 
 
 def q2bowmatrix(questions, words):
