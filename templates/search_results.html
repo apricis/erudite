@@ -47,20 +47,60 @@
 		    </table>
     	</div>
     </div>
+
     <div class="row">
-			{% for page in pages %}
-				<div class="col s12">
-				  <div class="card blue-grey darken-1">
-				    <div class="card-content white-text">
-				      <span class="card-title">{{page._source.title}} ({{page._score}})</span>
-				      <p>{{page._source.content}}</p>
-				    </div>
+      {% if ranked_pages or passages %}
+      <div class="col s12">
+        <ul class="tabs">
+          <li class="tab col s4"><a href="#pages">Before re-ranking</a></li>
+          {% if ranked_pages %}
+            <li class="tab col s4"><a href="#ranked">After re-ranking</a></li>
+          {% endif %}
+          {% if passages %}
+            <li class="tab col s4"><a class="active" href="#passages">After passage extraction</a></li>
+          {% endif %}
+        </ul>
+      </div>
+      {% endif %}
+      <div id="pages" class="col s12">
+        {% for page in pages %}
+          <div class="card blue-grey darken-1">
+            <div class="card-content white-text">
+              <span class="card-title">{{loop.index}}. {{page._source.title}} ({{page._score}})</span>
+              <p>{{page._source.content}}</p>
+            </div>
             <div class="card-action">
               <a href="{{page._source.url}}">Go to Wikipedia article</a>
             </div>
-				  </div>
-				</div>
-			{% endfor %}
-		</div>
+          </div>
+        {% endfor %}
+      </div>
+      {% if ranked_pages %}
+      <div id="ranked" class="col s12">
+        {% for page in ranked_pages %}
+          <div class="card blue-grey darken-1">
+            <div class="card-content white-text">
+              <span class="card-title">{{loop.index}}. {{page._source.title}} ({{page._score}})</span>
+              <p>{{page._source.content}}</p>
+            </div>
+            <div class="card-action">
+              <a href="{{page._source.url}}">Go to Wikipedia article</a>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% if passages %}
+      <div id="passages" class="col s12">
+        {% for snippet, score in passages %}
+          <div class="card blue-grey darken-1">
+            <div class="card-content white-text">
+              <p>[{{score}}] {{snippet}}</p>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
 	</div>
 {% endblock %}

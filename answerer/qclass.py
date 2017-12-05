@@ -7,15 +7,22 @@ import numpy as np
 import pickle
 import logging
 import matplotlib.pyplot as plt
+from collections import defaultdict
+from operator import itemgetter, mul
 from sklearn import svm, preprocessing
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.multiclass import OneVsRestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import classification_report
 from sklearn.metrics import confusion_matrix
 from scipy.stats import describe
-from scipy.sparse import lil_matrix
-from elasticsearch import Elasticsearch
+from scipy.sparse import lil_matrix, vstack
+try:
+    from .rvc import RVC, linear_kernel
+except:
+    from rvc import RVC, linear_kernel
+from annoy import AnnoyIndex
 
 
 LOGGING_LEVEL = logging.DEBUG
@@ -38,13 +45,19 @@ logging.basicConfig(level=LOGGING_LEVEL, format="%(asctime)s - %(process)d -  %(
 ##
 ## @brief      { function_description }
 ##
-## @param      q        The question
-## @param      vecs     The vecs
-## @param      weights  The weights
+## @param      q            The question
+## @param      vecs_index   AnnoyIndex instance with all wordvecs in it
+## @param      weights      The weights
 ##
 ## @return     { description_of_the_return_value }
 ##
-def q2vec(q, vecs, weights=None, default_weight=1):
+def q2vec(q, vecs_index, conn, weights=None, default_weight=1):
+    with conn.cursor() as cursor:
+        res = cursor.execute("""
+        SELECT annoy_id, word FROM words2annoy_100 WHERE word IN ({})
+        """.format(",".join(["%s"]*len(q))), [x.lower() for x in q])
+        vecs = dict([(x[1].decode("utf-8"), vecs_index.get_item_vector(x[0])) for x in cursor.fetchall()])
+
     if weights:
         return np.sum([weights.get(x.lower(), default_weight) * np.array(vecs[x.lower()]) 
                        for x in q if x.lower() in vecs], axis=0)
@@ -65,18 +78,26 @@ def q2bow(q, conn):
         return v
 
 
-def q2bowmatrix(questions, words):
-    V, N = len(words), len(questions)
-    logging.debug("Creating a BoW matrix {}x{}".format(N, V))
-    bow_matrix = lil_matrix((N, V), dtype=np.bool)
-    questions = [[w.lower() for w in q] for q in questions]
-    
-    for i, q in enumerate(questions):
-        for w in q:
-            j = words.get(w, -1)
-            if j != -1:
-                bow_matrix[i, j] = 1
-    return bow_matrix
+def q2bowmatrix(questions, conn):
+    with conn.cursor() as cursor:
+        res = cursor.execute("SELECT COUNT(*) FROM words;")
+        V = cursor.fetchone()[0]
+        N = len(questions)
+        logging.debug("Creating a BoW matrix {}x{}".format(N, V))
+        bow_matrix = lil_matrix((N, V), dtype=np.bool)
+        questions = [[w.lower() for w in q] for q in questions]
+        
+        for i, q in enumerate(questions):
+            res = cursor.execute("""
+            SELECT id FROM words WHERE word IN ({});
+            """.format(",".join(["%s"]*len(q))), q)
+            ids = [x[0] for x in cursor.fetchall()]
+            bow_matrix[i, ids] = 1
+        return bow_matrix
+
+
+def get_coarse_class(labels):
+    return np.array(list(map(itemgetter(slice(0, 3)), labels)))
 
 
 ##
@@ -84,17 +105,19 @@ def q2bowmatrix(questions, words):
 ##
 ## @param      vecs       The vecs
 ## @param      atypes     The atypes
-## @param      clf        The clf
 ## @param      desc       The description
-## @param      questions  The questions
 ##
 ## @return     { description_of_the_return_value }
 ##
-def print_stats(vecs, atypes, clf, desc, questions=None):
-    pred_atypes = le.inverse_transform(clf.predict(vecs))
-    correct, total = np.sum(pred_atypes == atypes), len(atypes)
-    percentage = round(correct / total * 100, 2)
-    logging.info("{}: correctly classified -- {}/{} -- {}%".format(desc, correct, total, percentage))
+def print_stats(pred_atypes, atypes, desc):
+    fine_correct, total = np.sum(pred_atypes == atypes), len(atypes)
+    coarse_correct = np.sum(get_coarse_class(pred_atypes) == get_coarse_class(atypes))
+    fine_percentage = round(fine_correct / total * 100, 2)
+    coarse_percentage = round(coarse_correct / total * 100, 2)
+    logging.info("{}: correctly classified (coarse-grained) -- {}/{} -- {}%".format(
+                 desc, coarse_correct, total, coarse_percentage))
+    logging.info("{}: correctly classified (fine-grained) -- {}/{} -- {}%".format(
+                 desc, fine_correct, total, fine_percentage))
 
 
 ##
@@ -105,12 +128,12 @@ def print_stats(vecs, atypes, clf, desc, questions=None):
 ##
 ## @return     { description_of_the_return_value }
 ##
-def predict(q, clf):
+def predict(q, clf, conn, vecs_index):
     print(q, end=' -- ')
     if args.word_vectors:
-        pred = clf.predict(q2vec(q.split(), vecs).reshape(1, -1))
+        pred = clf.predict(q2vec(q.split(), vecs_index, conn).reshape(1, -1))
     elif args.bag_of_words:
-        pred = clf.predict(q2bow(q.split(), words).reshape(1, -1))
+        pred = clf.predict(q2bow(q.split(), conn).reshape(1, -1))
     print(le.inverse_transform(pred))
 
 
@@ -131,7 +154,6 @@ def display_le_histogram(enc_data, le, plot_title):
              orientation='horizontal', align='left')
     plt.title(plot_title)
     plt.yticks(range(len(le.classes_)), le.classes_)
-    plt.show()
 
 
 def load_data(fname):
@@ -177,12 +199,52 @@ def plot_confusion_matrix(cm, classes,
     plt.tight_layout()
     plt.ylabel('True label')
     plt.xlabel('Predicted label')
-    plt.show()
+
+
+def coarse_fine_split(vecs, labels):
+    fine_grained = defaultdict(list)
+    labels_coarse = []
+    for v, l in zip(vecs, labels):
+        c_label = l.split(':')[0]
+        fine_grained[c_label].append((v, l))
+        labels_coarse.append(c_label)
+    return vecs, labels_coarse, fine_grained
+
+
+def only_confused_matrix(cmtr):
+    R, C = cmtr.shape
+    rows2keep, cols2keep = [], []
+    for i in range(R):
+        row_confused, col_confused = 0, 0
+        for j in range(C):
+            if i != j:
+                row_confused += cmtr[i][j]
+                col_confused += cmtr[j][i]
+        if row_confused > 0:
+            rows2keep.append(i)
+        if col_confused > 0:
+            cols2keep.append(i)
+    dim2keep = rows2keep if len(rows2keep) > len(cols2keep) else cols2keep
+    return cmtr[dim2keep, :][:, dim2keep], dim2keep
+
 
 
 if __name__ == '__main__':
+    import pymysql
+    import configparser
+
+    config = configparser.ConfigParser()
+    config.read('../config.ini')
+
+    conn = pymysql.connect(host='127.0.0.1', user=config['db']['user'], charset='utf8',
+                           db=config['db']['name'], password=config['db']['password'])
+
     parser = argparse.ArgumentParser()
+    parser.add_argument('--hsvm', action='store_true')
+    parser.add_argument('--svm', action='store_true')
+    parser.add_argument('--rvm', action='store_true')
     parser.add_argument('-wv', '--word-vectors', action='store_true')
+    parser.add_argument('-d', '--dimension', default=300, type=int)
     parser.add_argument('-bow', '--bag-of-words', action='store_true')
     parser.add_argument('-val', '--validation', action='store_true')
     parser.add_argument('-t', '--test', action='store_true')
@@ -198,39 +260,19 @@ if __name__ == '__main__':
     le.fit(answer_types)
     enc_atypes = le.transform(answer_types)
 
-    if args.save:
-        pickle.dump(le, open("svm.le", "wb"))
-
     if args.word_vectors:
         logging.info("Using word vectors. Loading...")
-        vecs = pickle.load(open('../../data/glove.6B/glove.300d.pkl', 'rb'))
-        q_vecs = np.array([q2vec(q, vecs) for q in questions])
+        vecs_index = AnnoyIndex(args.dimension)
+        vecs_index.load('../data/glove{}.ann'.format(args.dimension))
+        q_vecs = np.array([q2vec(q, vecs_index, conn) for q in questions])
         logging.info("Finished loading word vectors.")
     elif args.bag_of_words:
         logging.info("Using bag-of-words. Loading...")
-        words = dict([(w, i) for i, w in enumerate(json.load(open('../../wiki_indexer/count.json')))])
-        # if args.min_df:
-        #     words = []
-        #     for w in df:
-        #         if df[w] >= args.min_df:
-        #             words.append(w)
-        # else:
-        #     words = df.keys()
-        # N = len(words)
-        # logging.warning("There are {} words in vocabulary, which might result in MemoryError".format(N))
-        q_vecs = q2bowmatrix(questions, words)
+        q_vecs = q2bowmatrix(questions, conn)
         logging.info("Finished loading bag-of-words.")
     else:
         logging.error("Please specify the text representation to be used")
         exit(1)
-    
-    # Getting IDF
-    # N = 5438663 # counted via python script
-    # logging.info("Computing IDF...")
-    # weights = json.load(open('../wiki_indexer/df.json'))
-    # for w in weights:
-    #     weights[w] = np.log10(N / weights[w])
-    # logging.info("Finished IDF computation.")
 
     if args.validation:
         logging.info("Preparing data...")
@@ -239,66 +281,135 @@ if __name__ == '__main__':
 
         train_enc_atypes, val_enc_atypes = le.transform(train_atypes), le.transform(val_atypes)
         if args.histogram:
+            plt.figure()
             display_le_histogram(train_enc_atypes, le, "Distribution of answer types in training data")
+            plt.figure()
             display_le_histogram(val_enc_atypes, le, "Distribution of answer types in validation data")
         logging.info("Finished preparing data.")
-    elif args.histogram:
-        display_le_histogram(enc_atypes, le, "Distribution of answer types in training data")
-
-    # After CV on RBF kernel the value of gamma is 0.25
-    logging.info("Training SVM classifier...")
-    clf = svm.SVC(kernel='linear')
-    # clf = RandomForestClassifier(n_estimators=30, max_depth=11, criterion='entropy', random_state=0)
-    logging.info(clf)
-    # clf = GridSearchCV(svc, {
-    #     'C': np.arange(0.4, 0.81, 0.1),
-    #     'gamma': np.arange(0.1, 0.21, 0.01)}, cv=5)
-    if args.validation:
-        clf.fit(train_q_vecs, train_enc_atypes)
     else:
-        clf.fit(q_vecs, enc_atypes)
+        train_q_vecs, train_enc_atypes, train_atypes = q_vecs, enc_atypes, answer_types
+
+    if args.histogram:
+        display_le_histogram(enc_atypes, le, "Distribution of answer types in training data")
+    
+    if args.hsvm:
+        logging.info("Training hierarchical SVM classifier -- 2 stages")
+        logging.info("Preparing data...")
+        train_coarse, atypes_coarse, fine_grained = coarse_fine_split(q_vecs, answer_types)
+
+        logging.info("1) Training coarse-grained SVM classifier...")
+        coarse_le = preprocessing.LabelEncoder()
+        coarse_le.fit(atypes_coarse)
+        enc_atypes_coarse = coarse_le.transform(atypes_coarse)
+        clf_coarse = svm.SVC(kernel='linear')
+        clf_coarse.fit(train_coarse, enc_atypes_coarse)
+
+        logging.info("2) Training fine-grained SVM classifier...")
+        clf_fine_grained = {}
+        for coarse_eat in fine_grained:
+            f_clf = svm.SVC(kernel='linear')
+            try:
+                f_vecs = vstack(map(itemgetter(0), fine_grained[coarse_eat]))
+            except:
+                f_vecs = list(map(itemgetter(0), fine_grained[coarse_eat]))
+            f_atypes = list(map(itemgetter(1), fine_grained[coarse_eat]))
+            f_enc_atypes = le.transform(f_atypes)
+            f_clf.fit(f_vecs, f_enc_atypes)
+            clf_fine_grained[coarse_eat] = f_clf
+
+        pred_enc_coarse = clf_coarse.predict(train_q_vecs)
+        pred_coarse = coarse_le.inverse_transform(pred_enc_coarse)
+        final_pred_enc_atypes = []
+        for v, cl in zip(train_q_vecs, pred_coarse):
+            total_shape = mul(*v.shape) if len(v.shape) == 2 else v.shape[0]
+            final_pred_enc_atypes.extend(clf_fine_grained[cl].predict(v.reshape((1, total_shape))))
+        final_pred_atypes = le.inverse_transform(final_pred_enc_atypes)
+        print_stats(final_pred_atypes, train_atypes, "TRAINING DATA")
+    else:
+        if args.svm:
+            # After CV on RBF kernel the value of gamma is 0.25
+            logging.info("Training SVM classifier...")
+            clf = svm.SVC(kernel='linear')
+        elif args.rvm:
+            logging.info("Training RVM classifier...")
+            clf = OneVsRestClassifier(RVC(kernel=linear_kernel), n_jobs=-1)
+
+        logging.info(clf)
+        # clf = GridSearchCV(svc, {
+        #     'C': np.arange(0.4, 0.81, 0.1),
+        #     'gamma': np.arange(0.1, 0.21, 0.01)}, cv=5)
+        clf.fit(train_q_vecs, train_enc_atypes)
+
+        # Cross-validation
+        # print("Best parameters set found on development set:")
+        # print()
+        # print(clf.best_params_)
+        # print()
+        # print("Grid scores on development set:")
+        # print()
+        # means = clf.cv_results_['mean_test_score']
+        # stds = clf.cv_results_['std_test_score']
+        # for mean, std, params in zip(means, stds, clf.cv_results_['params']):
+        #     print("%0.3f (+/-%0.03f) for %r"
+        #           % (mean, std * 2, params))
+        # print()
+
+        method_name = 'SVM' if args.svm else 'RVM'
+        features = 'bow' if args.bag_of_words else 'wv {}d'.format(args.dimension) 
+        cplot_title = 'Confusion matrix ({}, {})'.format(method_name, features)
+        pred_train_enc_atypes = clf.predict(train_q_vecs)
+        pred_train_atypes = le.inverse_transform(pred_train_enc_atypes)
+        # confusion_mtr = confusion_matrix(train_enc_atypes, pred_train_enc_atypes)
+        # plt.figure()
+        # plot_confusion_matrix(confusion_mtr, le.classes_, title=cplot_title)
+        # only_confused_mtr, dim2keep = only_confused_matrix(confusion_mtr)
+        # plt.figure()
+        # plot_confusion_matrix(only_confused_mtr, le.classes_[dim2keep], title=cplot_title)
+        print_stats(pred_train_atypes, train_atypes, "TRAINING DATA")
+        if args.validation:
+            pred_val_atypes = le.inverse_transform(clf.predict(val_q_vecs))
+            print_stats(pred_val_atypes, val_atypes, "VALIDATION DATA")
     
     if args.save:
-        if args.bag_of_words: save_label = "bow"
-        elif args.word_vectors: save_label = "wv"
+        if args.hsvm: method_name = 'hsvm'
+        elif args.svm: method_name = 'svm'
+        elif args.rvm: method_name = 'rvm'
 
-        pickle.dump(clf, open("svm_{}.clf".format(save_label), "wb"))
-
-    # train_enc_pred = clf.predict(train_q_vecs)
-    # plot_confusion_matrix(confusion_matrix(train_enc_atypes, train_enc_pred), le.classes_)
-
-    # Cross-validation
-    # print("Best parameters set found on development set:")
-    # print()
-    # print(clf.best_params_)
-    # print()
-    # print("Grid scores on development set:")
-    # print()
-    # means = clf.cv_results_['mean_test_score']
-    # stds = clf.cv_results_['std_test_score']
-    # for mean, std, params in zip(means, stds, clf.cv_results_['params']):
-    #     print("%0.3f (+/-%0.03f) for %r"
-    #           % (mean, std * 2, params))
-    # print()
-    
-    if args.validation:
-        print_stats(train_q_vecs, train_atypes, clf, "TRAINING DATA")
-        print_stats(val_q_vecs, val_atypes, clf, "VALIDATION DATA")
-    else:
-        print_stats(q_vecs, answer_types, clf, "TRAINING DATA")
+        # need to dump 7 classifiers for hsvm
+        if args.word_vectors:
+            pickle.dump(clf, open("{}_wv_{}.clf".format(method_name, args.dimension), "wb"))
+        elif args.bag_of_words:
+            pickle.dump(clf, open("{}_bow.clf".format(method_name), "wb"))
+        # need to dump 2 label encoders for hsvm
+        pickle.dump(le, open("{}.le".format(method_name), "wb"))
 
     if args.test:
         test_q, test_atypes = load_data(test_file)
+        # plt.figure()
+        # display_le_histogram(le.transform(test_atypes), le, "Distribution of answer types in test data")
         if args.word_vectors:
-            test_q_vecs = np.array([q2vec(q, vecs) for q in test_q])
+            test_q_vecs = np.array([q2vec(q, vecs_index, conn) for q in test_q])
         elif args.bag_of_words:
-            test_q_vecs = q2bowmatrix(test_q, words)
-        print_stats(test_q_vecs, test_atypes, clf, "TEST DATA")
+            test_q_vecs = q2bowmatrix(test_q, conn)
 
-    predict("What 's the capital of Sweden ?", clf)
-    predict("What city is the capital of Great Britain ?", clf)
-    predict("What is the capital of Ukraine ?", clf)
-    predict("Who is the president of Ukraine ?", clf)
-    predict("When was the second world war ?", clf)
-    predict("What is chemical formula ?", clf)
+        if args.hsvm:            
+            pred_enc_coarse = clf_coarse.predict(test_q_vecs)
+            pred_coarse = coarse_le.inverse_transform(pred_enc_coarse)
+            final_pred_enc_atypes = []
+            for v, cl in zip(test_q_vecs, pred_coarse):
+                total_shape = mul(*v.shape) if len(v.shape) == 2 else v.shape[0]
+                final_pred_enc_atypes.extend(clf_fine_grained[cl].predict(v.reshape((1, total_shape))))
+            final_pred_atypes = le.inverse_transform(final_pred_enc_atypes)
+            print_stats(final_pred_atypes, test_atypes, "TEST DATA")
+        else:
+            pred_atypes = le.inverse_transform(clf.predict(test_q_vecs))
+            print_stats(pred_atypes, test_atypes, "TEST DATA")
 
+    vecs_index = locals().get('vecs_index', None)
+    # predict("What 's the capital of Sweden ?", clf, conn, vecs_index)
+    # predict("What city is the capital of Great Britain ?", clf, conn, vecs_index)
+    # predict("What is the capital of Ukraine ?", clf, conn, vecs_index)
+    # predict("Who is the president of Ukraine ?", clf, conn, vecs_index)
+    # predict("When was the second world war ?", clf, conn, vecs_index)
+    # predict("What is chemical formula ?", clf, conn, vecs_index)
+    plt.show()
