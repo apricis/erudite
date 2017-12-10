@@ -7,5 +7,7 @@ answerer/__pycache__
 answerer/*.txt
 answerer/*.clf
 answerer/*.le
+*/*.sh
+*/*.pdf
 *.txt
 *.ini

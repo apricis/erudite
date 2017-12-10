@@ -7,7 +7,7 @@ import numpy as np
 import pickle
 import logging
 import matplotlib.pyplot as plt
-from collections import defaultdict
+from collections import defaultdict, Counter
 from operator import itemgetter, mul
 from sklearn import svm, preprocessing
 from sklearn.ensemble import RandomForestClassifier
@@ -51,11 +51,11 @@ logging.basicConfig(level=LOGGING_LEVEL, format="%(asctime)s - %(process)d -  %(
 ##
 ## @return     { description_of_the_return_value }
 ##
-def q2vec(q, vecs_index, conn, weights=None, default_weight=1):
+def q2vec(q, vecs_index, conn, lang='en', weights=None, default_weight=1):
     with conn.cursor() as cursor:
         res = cursor.execute("""
-        SELECT annoy_id, word FROM words2annoy_100 WHERE word IN ({})
-        """.format(",".join(["%s"]*len(q))), [x.lower() for x in q])
+        SELECT annoy_id, word FROM {}_words2annoy_200 WHERE word IN ({})
+        """.format(lang, ",".join(["%s"]*len(q))), [x.lower() for x in q])
         vecs = dict([(x[1].decode("utf-8"), vecs_index.get_item_vector(x[0])) for x in cursor.fetchall()])
 
     if weights:
@@ -65,22 +65,22 @@ def q2vec(q, vecs_index, conn, weights=None, default_weight=1):
         return np.average([vecs[x.lower()] for x in q if x.lower() in vecs], axis=0)
 
 
-def q2bow(q, conn):
+def q2bow(q, conn, lang='en'):
     with conn.cursor() as cursor:
-        res = cursor.execute("SELECT COUNT(*) FROM words;")
+        res = cursor.execute("SELECT COUNT(*) FROM sv_words;")
         N = cursor.fetchone()[0]
         v = np.zeros((N, 1))
         res = cursor.execute("""
-        SELECT id FROM words WHERE word IN ({});
-        """.format(",".join(["%s"]*len(q))), q)
+        SELECT id FROM {}_words WHERE word IN ({});
+        """.format(lang, ",".join(["%s"]*len(q))), q)
         ids = [x[0] for x in cursor.fetchall()]
         v[ids] = 1
         return v
 
 
-def q2bowmatrix(questions, conn):
+def q2bowmatrix(questions, conn, lang='en'):
     with conn.cursor() as cursor:
-        res = cursor.execute("SELECT COUNT(*) FROM words;")
+        res = cursor.execute("SELECT COUNT(*) FROM {}_words;".format(lang))
         V = cursor.fetchone()[0]
         N = len(questions)
         logging.debug("Creating a BoW matrix {}x{}".format(N, V))
@@ -89,8 +89,8 @@ def q2bowmatrix(questions, conn):
         
         for i, q in enumerate(questions):
             res = cursor.execute("""
-            SELECT id FROM words WHERE word IN ({});
-            """.format(",".join(["%s"]*len(q))), q)
+            SELECT id FROM {}_words WHERE word IN ({});
+            """.format(lang, ",".join(["%s"]*len(q))), q)
             ids = [x[0] for x in cursor.fetchall()]
             bow_matrix[i, ids] = 1
         return bow_matrix
@@ -150,10 +150,22 @@ def predict(q, clf, conn, vecs_index):
 def display_le_histogram(enc_data, le, plot_title):
     n_classes = len(le.classes_)
     min_class, max_class  = 0, n_classes - 1
-    plt.hist(enc_data, bins=n_classes, range=(min_class, max_class+1), rwidth=0.9,
-             orientation='horizontal', align='left')
+    c = list(Counter(enc_data).items())
+    c.sort(key=itemgetter(1))
+    labels, values = zip(*c)
+
+    labels_len, non_zero = len(labels), len(values)
+    classes = np.array(le.classes_)[list(labels)]
+    zero_labels = [c for c in le.classes_ if c not in classes]
+
+    if zero_labels:
+        pad = len(zero_labels)
+        classes = np.insert(classes, 0, zero_labels)
+        values = np.pad(values, (pad, 0), mode='constant', constant_values=0)
+
+    plt.barh(range(n_classes), values, 0.9)
     plt.title(plot_title)
-    plt.yticks(range(len(le.classes_)), le.classes_)
+    plt.yticks(range(n_classes), classes, fontsize=5)
 
 
 def load_data(fname):
@@ -243,6 +255,7 @@ if __name__ == '__main__':
     parser.add_argument('--hsvm', action='store_true')
     parser.add_argument('--svm', action='store_true')
     parser.add_argument('--rvm', action='store_true')
+    parser.add_argument('-l', '--lang', type=str, default='en')
     parser.add_argument('-wv', '--word-vectors', action='store_true')
     parser.add_argument('-d', '--dimension', default=300, type=int)
     parser.add_argument('-bow', '--bag-of-words', action='store_true')
@@ -252,9 +265,10 @@ if __name__ == '__main__':
     parser.add_argument('-hist', '--histogram', action='store_true')
     parser.add_argument('--min-df', default=100, type=int)
     args = parser.parse_args()
+    print(args)
 
-    training_file = os.path.join(UIUC_DATA, 'train_5500.label')
-    test_file = os.path.join(UIUC_DATA, 'test.label')
+    training_file = os.path.join(UIUC_DATA, '{}_train_5500.label'.format(args.lang))
+    test_file = os.path.join(UIUC_DATA, '{}_test.label'.format(args.lang))
     questions, answer_types = load_data(training_file)
     le = preprocessing.LabelEncoder()
     le.fit(answer_types)
@@ -263,12 +277,12 @@ if __name__ == '__main__':
     if args.word_vectors:
         logging.info("Using word vectors. Loading...")
         vecs_index = AnnoyIndex(args.dimension)
-        vecs_index.load('../data/glove{}.ann'.format(args.dimension))
-        q_vecs = np.array([q2vec(q, vecs_index, conn) for q in questions])
+        vecs_index.load('../data/glove.{}.{}.ann'.format(args.lang, args.dimension))
+        q_vecs = np.array([q2vec(q, vecs_index, conn, lang=args.lang) for q in questions])
         logging.info("Finished loading word vectors.")
     elif args.bag_of_words:
         logging.info("Using bag-of-words. Loading...")
-        q_vecs = q2bowmatrix(questions, conn)
+        q_vecs = q2bowmatrix(questions, conn, lang=args.lang)
         logging.info("Finished loading bag-of-words.")
     else:
         logging.error("Please specify the text representation to be used")
@@ -291,6 +305,7 @@ if __name__ == '__main__':
 
     if args.histogram:
         display_le_histogram(enc_atypes, le, "Distribution of answer types in training data")
+        plt.savefig('hist_train.pdf', bbox_inches='tight')
     
     if args.hsvm:
         logging.info("Training hierarchical SVM classifier -- 2 stages")
@@ -377,20 +392,22 @@ if __name__ == '__main__':
 
         # need to dump 7 classifiers for hsvm
         if args.word_vectors:
-            pickle.dump(clf, open("{}_wv_{}.clf".format(method_name, args.dimension), "wb"))
+            pickle.dump(clf, open("{}_{}_wv_{}.clf".format(args.lang, method_name, args.dimension), "wb"))
         elif args.bag_of_words:
-            pickle.dump(clf, open("{}_bow.clf".format(method_name), "wb"))
+            pickle.dump(clf, open("{}_{}_bow.clf".format(args.lang, method_name), "wb"))
         # need to dump 2 label encoders for hsvm
-        pickle.dump(le, open("{}.le".format(method_name), "wb"))
+        pickle.dump(le, open("{}_{}.le".format(args.lang, method_name), "wb"))
 
     if args.test:
         test_q, test_atypes = load_data(test_file)
-        # plt.figure()
-        # display_le_histogram(le.transform(test_atypes), le, "Distribution of answer types in test data")
+        if args.histogram:
+            plt.figure()
+            display_le_histogram(le.transform(test_atypes), le, "Distribution of answer types in test data")
+            plt.savefig('hist_test.pdf', bbox_inches='tight')
         if args.word_vectors:
-            test_q_vecs = np.array([q2vec(q, vecs_index, conn) for q in test_q])
+            test_q_vecs = np.array([q2vec(q, vecs_index, conn, lang=args.lang) for q in test_q])
         elif args.bag_of_words:
-            test_q_vecs = q2bowmatrix(test_q, conn)
+            test_q_vecs = q2bowmatrix(test_q, conn, lang=args.lang)
 
         if args.hsvm:            
             pred_enc_coarse = clf_coarse.predict(test_q_vecs)
@@ -412,4 +429,4 @@ if __name__ == '__main__':
     # predict("Who is the president of Ukraine ?", clf, conn, vecs_index)
     # predict("When was the second world war ?", clf, conn, vecs_index)
     # predict("What is chemical formula ?", clf, conn, vecs_index)
-    plt.show()
+    # plt.show()
